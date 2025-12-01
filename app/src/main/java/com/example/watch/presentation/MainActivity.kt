@@ -33,22 +33,13 @@ class MainActivity : Activity(), SensorEventListener {
     private val handler = Handler(Looper.getMainLooper())
     private val client = OkHttpClient()
     private val toneGen = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+    private val serverUrl = "http://192.168.1.9:5001/post"
 
     private var gestureCounter = 0
     private var lastMovementTime = System.currentTimeMillis()
     private val stillnessThreshold = 0.3f
     private val stillnessDuration = 2000L
     private var isRecording = false
-
-    // Periodic data send (every 1 second)
-    private val updateTask = object : Runnable {
-        override fun run() {
-            if (isRecording) {
-                displayAndSendValues()
-                handler.postDelayed(this, 1000)
-            }
-        }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -173,31 +164,35 @@ class MainActivity : Activity(), SensorEventListener {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         mainLayout.keepScreenOn = true
 
-        // Show 3 and start recording
+        // Show 3, start recording, and send first data
         showCountdown(3)
         startRecording()
+        displayAndSendValues()
+
+        // Schedule UI updates and data sends for 2 and 1
+        handler.postDelayed({
+            showCountdown(2)
+            displayAndSendValues()
+        }, 1000)
 
         handler.postDelayed({
-            // Show 2
-            showCountdown(2)
+            showCountdown(1)
+            displayAndSendValues()
+        }, 2000)
+
+        // Stop recording after 3 seconds
+        handler.postDelayed({
+            stopRecording()
+            showDone()
             handler.postDelayed({
-                // Show 1
-                showCountdown(1)
-                handler.postDelayed({
-                    // Stop recording, show Done
-                    stopRecording()
-                    showDone()
-                    handler.postDelayed({
-                        // Go back to Start after 500ms
-                        showStartScreen()
-                    }, 500) // Show "Done" for 0.5 seconds
-                }, 1000)
-            }, 1000)
-        }, 1000)
+                // Go back to Start after 500ms
+                showStartScreen()
+            }, 500) // Show "Done" for 0.5 seconds
+        }, 3000)
     }
 
     // --------------------------------
-    // 🔴 RECORDING CONTROL
+    // RECORDING CONTROL
     // --------------------------------
     private fun startRecording() {
         isRecording = true
@@ -221,10 +216,6 @@ class MainActivity : Activity(), SensorEventListener {
             Log.e("MainActivity", "Sensor registration failed", e)
             return
         }
-
-        // Send first data immediately, then every 1 second
-        displayAndSendValues()
-        handler.postDelayed(updateTask, 1000)
     }
 
     private fun stopRecording() {
@@ -233,8 +224,6 @@ class MainActivity : Activity(), SensorEventListener {
         // Clear screen-on flags
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         mainLayout.keepScreenOn = false
-
-        handler.removeCallbacks(updateTask)
 
         try {
             sensorManager.unregisterListener(this)
@@ -301,14 +290,14 @@ GYRO: $gyroText""")
     // HTTP SEND
     // --------------------------------
     private fun sendToServer(data: String) {
-        Log.d("HTTP", "Sending: ${data.replace("\n", "\\n")}")
+        Log.d("HTTP", "Sending: ${data.replace("", "\n")}")
         val body = FormBody.Builder()
             .add("value", data)
             .add("fileNum", gestureCounter.toString())
             .build()
 
         val request = Request.Builder()
-            .url("http://192.168.1.8:5001/post")
+            .url(serverUrl)
             .post(body)
             .build()
 
