@@ -8,38 +8,51 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.media.AudioManager
 import android.media.ToneGenerator
-import android.os.*
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.widget.*
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Toast
 import androidx.core.content.ContextCompat
 import okhttp3.*
 import java.io.IOException
-import kotlin.math.sqrt
 
 class MainActivity : Activity(), SensorEventListener {
 
+    // --- Configuration ---
+    private val gestureRecordDuration = 3000L // 3 seconds
+    private val sensorDelay = 10000 // 10ms = 100Hz
+    private val serverUrl = "http://192.168.93.13:5001/post"
+    private val gestureFilePrefix = "u_test"
+    private val csvHeader = "timestamp,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z"
+
+    // --- State ---
     private lateinit var sensorManager: SensorManager
+    private var isRecording = false
+    private var startTime = 0L
+
+    // Buffers for sensor data
     private var accelerometerValues: FloatArray? = null
     private var gyroscopeValues: FloatArray? = null
+    private val gestureData = mutableListOf<String>()
+    private var gestureCounter = 0
 
+    // --- UI ---
     private lateinit var mainLayout: FrameLayout
     private lateinit var centerCircle: LinearLayout
     private lateinit var centerText: TextView
-    private lateinit var titleText: TextView
 
+    // --- Utilities ---
     private val handler = Handler(Looper.getMainLooper())
     private val client = OkHttpClient()
     private val toneGen = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
-    private val serverUrl = "http://192.168.1.9:5001/post"
 
-    private var gestureCounter = 0
-    private var lastMovementTime = System.currentTimeMillis()
-    private val stillnessThreshold = 0.3f
-    private val stillnessDuration = 2000L
-    private var isRecording = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,20 +73,6 @@ class MainActivity : Activity(), SensorEventListener {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-        }
-
-        // Title at top
-        titleText = TextView(this).apply {
-            textSize = 16f
-            setTextColor(ContextCompat.getColor(this@MainActivity, android.R.color.darker_gray))
-            gravity = Gravity.CENTER
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                topMargin = 40
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            }
         }
 
         // Center circle container
@@ -103,7 +102,6 @@ class MainActivity : Activity(), SensorEventListener {
         }
 
         centerCircle.addView(centerText)
-        mainLayout.addView(titleText)
         mainLayout.addView(centerCircle)
 
         // Add click listener to the circle
@@ -160,35 +158,23 @@ class MainActivity : Activity(), SensorEventListener {
     // COUNTDOWN SEQUENCE
     // --------------------------------
     private fun startCountdownSequence() {
-        // Keep screen on
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         mainLayout.keepScreenOn = true
 
-        // Show 3, start recording, and send first data
         showCountdown(3)
         startRecording()
-        displayAndSendValues()
 
-        // Schedule UI updates and data sends for 2 and 1
-        handler.postDelayed({
-            showCountdown(2)
-            displayAndSendValues()
-        }, 1000)
+        handler.postDelayed({ showCountdown(2) }, 1000)
+        handler.postDelayed({ showCountdown(1) }, 2000)
 
-        handler.postDelayed({
-            showCountdown(1)
-            displayAndSendValues()
-        }, 2000)
-
-        // Stop recording after 3 seconds
         handler.postDelayed({
             stopRecording()
+            processAndUploadData()
             showDone()
             handler.postDelayed({
-                // Go back to Start after 500ms
                 showStartScreen()
             }, 500) // Show "Done" for 0.5 seconds
-        }, 3000)
+        }, gestureRecordDuration)
     }
 
     // --------------------------------
@@ -196,40 +182,26 @@ class MainActivity : Activity(), SensorEventListener {
     // --------------------------------
     private fun startRecording() {
         isRecording = true
+        startTime = System.currentTimeMillis()
 
-        try {
-            sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
-                sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
-            } ?: run {
-                Toast.makeText(this, "Accelerometer not available", Toast.LENGTH_SHORT).show()
-                return
-            }
+        gestureData.clear()
+        accelerometerValues = null
+        gyroscopeValues = null
 
-            sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let {
-                sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
-            } ?: run {
-                Toast.makeText(this, "Gyroscope not available", Toast.LENGTH_SHORT).show()
-                return
-            }
-        } catch (e: Exception) {
-            Toast.makeText(this, "Sensor init failed: ${e.message}", Toast.LENGTH_SHORT).show()
-            Log.e("MainActivity", "Sensor registration failed", e)
-            return
-        }
+
+        val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        val gyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+
+        sensorManager.registerListener(this, accel, sensorDelay)
+        sensorManager.registerListener(this, gyro, sensorDelay)
     }
 
     private fun stopRecording() {
         isRecording = false
+        sensorManager.unregisterListener(this)
 
-        // Clear screen-on flags
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         mainLayout.keepScreenOn = false
-
-        try {
-            sensorManager.unregisterListener(this)
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Sensor unregister failed: ${e.message}")
-        }
 
         try {
             toneGen.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 150)
@@ -238,22 +210,45 @@ class MainActivity : Activity(), SensorEventListener {
         }
     }
 
+    private fun processAndUploadData() {
+        if (gestureData.isEmpty()) {
+            Log.w("MainActivity", "No gesture data collected, skipping upload.")
+            return
+        }
+
+        val csvData = StringBuilder()
+        csvData.append(csvHeader).append("\n")
+        gestureData.forEach { line ->
+            csvData.append(line).append("\n")
+        }
+
+        val fileName = "${gestureFilePrefix}_${gestureCounter}.csv"
+        sendToServer(csvData.toString(), fileName)
+        gestureCounter++
+    }
+
+
     // --------------------------------
     // SENSOR EVENTS
     // --------------------------------
     override fun onSensorChanged(event: SensorEvent?) {
-        event?.let {
-            when (it.sensor.type) {
-                Sensor.TYPE_ACCELEROMETER -> accelerometerValues = it.values.clone()
-                Sensor.TYPE_GYROSCOPE -> gyroscopeValues = it.values.clone()
+        if (!isRecording || event == null) return
+
+        when (event.sensor.type) {
+            Sensor.TYPE_ACCELEROMETER -> {
+                accelerometerValues = event.values.clone()
+                // When we get a new accelerometer event, record a new data row
+                // using the latest gyroscope data. This makes accelerometer events the
+                // "driver" for our sampling rate.
+                gyroscopeValues?.let { gyro ->
+                    val acc = accelerometerValues!!
+                    val timestamp = System.currentTimeMillis() - startTime
+                    val csvLine = "$timestamp,${acc[0]},${acc[1]},${acc[2]},${gyro[0]},${gyro[1]},${gyro[2]}"
+                    gestureData.add(csvLine)
+                }
             }
-
-            val movement = accelerometerValues?.let { acc ->
-                sqrt((acc[0] * acc[0] + acc[1] * acc[1] + acc[2] * acc[2]).toDouble()).toFloat()
-            } ?: 0f
-
-            if (movement > stillnessThreshold) {
-                lastMovementTime = System.currentTimeMillis()
+            Sensor.TYPE_GYROSCOPE -> {
+                gyroscopeValues = event.values.clone()
             }
         }
     }
@@ -261,39 +256,15 @@ class MainActivity : Activity(), SensorEventListener {
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     // --------------------------------
-    // DATA DISPLAY + SEND
-    // --------------------------------
-    private fun displayAndSendValues() {
-        val acc = accelerometerValues
-        val gyro = gyroscopeValues
-        if (acc == null || gyro == null) return
-
-        val accText = "x = %.2f   y = %.2f   z = %.2f".format(acc[0], acc[1], acc[2])
-        val gyroText = "x = %.2f   y = %.2f   z = %.2f".format(gyro[0], gyro[1], gyro[2])
-
-        sendToServer("""ACC: $accText
-GYRO: $gyroText""")
-
-        if (System.currentTimeMillis() - lastMovementTime > stillnessDuration) {
-            try {
-                toneGen.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 200)
-            } catch (e: Exception) {
-                Log.w("MainActivity", "Failed to play gesture tone: ${e.message}")
-            }
-            gestureCounter++
-            sendToServer("GESTURE_END_$gestureCounter")
-            lastMovementTime = System.currentTimeMillis()
-        }
-    }
-
-    // --------------------------------
     // HTTP SEND
     // --------------------------------
-    private fun sendToServer(data: String) {
-        Log.d("HTTP", "Sending: ${data.replace("", "\n")}")
+    private fun sendToServer(csvData: String, fileName: String) {
+        Log.d("HTTP", "Uploading $fileName, size: ${csvData.length} bytes")
+
         val body = FormBody.Builder()
-            .add("value", data)
+            .add("value", csvData)
             .add("fileNum", gestureCounter.toString())
+            .add("fileName", fileName)
             .build()
 
         val request = Request.Builder()
