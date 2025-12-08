@@ -28,8 +28,8 @@ class MainActivity : Activity(), SensorEventListener {
     // --- Configuration ---
     private val gestureRecordDuration = 3000L // 3 seconds
     private val sensorDelay = 10000 // 10ms = 100Hz
-    private val serverUrl = "http://192.168.93.13:5001/post"
-    private val gestureFilePrefix = "u_test"
+    private val serverUrl = "http://192.168.93.10:5001/post"
+    private val gestureFilePrefix = "e"
     private val csvHeader = "timestamp,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z"
 
     // --- State ---
@@ -161,22 +161,43 @@ class MainActivity : Activity(), SensorEventListener {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         mainLayout.keepScreenOn = true
 
+        // --- Phase 1: The 3-Second "Get Ready" Delay ---
         showCountdown(3)
-        startRecording()
-
         handler.postDelayed({ showCountdown(2) }, 1000)
         handler.postDelayed({ showCountdown(1) }, 2000)
 
+        // --- Phase 2: Start Actual Recording ---
+        // We wait 3000ms (3 seconds) before triggering the recording
         handler.postDelayed({
-            stopRecording()
-            processAndUploadData()
-            showDone()
-            handler.postDelayed({
-                showStartScreen()
-            }, 500) // Show "Done" for 0.5 seconds
-        }, gestureRecordDuration)
-    }
 
+            // Visual cue that recording has started
+            centerText.text = "GO"
+            centerText.textSize = 64f
+
+            // Audio cue (short beep) so you don't have to look at the screen
+            try {
+                toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+            } catch (e: Exception) {
+                Log.w("MainActivity", "Tone failed: ${e.message}")
+            }
+
+            startRecording() // Sensors actually turn on here
+
+            // --- Phase 3: Stop Recording ---
+            // Schedule the stop based on your configured gestureRecordDuration
+            handler.postDelayed({
+                stopRecording()
+                processAndUploadData()
+                showDone()
+
+                // Reset to start screen after 1 second
+                handler.postDelayed({
+                    showStartScreen()
+                }, 1000)
+            }, gestureRecordDuration)
+
+        }, 3000)
+    }
     // --------------------------------
     // RECORDING CONTROL
     // --------------------------------
